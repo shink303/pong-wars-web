@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Pong Wars</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: -apple-system, 'SF Mono', 'Menlo', monospace; touch-action: none; }
+  canvas { display: block; width: 100%; height: 100%; }
+
+  /* Controls overlay */
+  #controls {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: rgba(0,0,0,0.75); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    padding: 12px 16px 20px; display: none; z-index: 10;
+    border-top: 1px solid rgba(255,255,255,0.1);
+  }
+  #controls.visible { display: block; }
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  .row:last-child { margin-bottom: 0; }
+  .btn {
+    background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.6);
+    border: 1px solid transparent; border-radius: 20px;
+    padding: 5px 12px; font-size: 12px; font-family: inherit; cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn:hover { background: rgba(255,255,255,0.15); }
+  .btn.active { background: rgba(255,255,255,0.2); color: #fff; border-color: rgba(255,255,255,0.4); }
+  .icon-btn {
+    width: 32px; height: 32px; border-radius: 50%; padding: 0;
+    display: flex; align-items: center; justify-content: center; font-size: 16px;
+  }
+  .preset {
+    width: 36px; height: 24px; border-radius: 6px; padding: 0; overflow: hidden;
+    display: flex; border: 1px solid rgba(255,255,255,0.2); cursor: pointer; background: none;
+  }
+  .preset.active { border: 2px solid rgba(255,255,255,0.8); }
+  .preset-half { flex: 1; }
+  .spacer { flex: 1; }
+  #speed-hint {
+    position: fixed; top: 60px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.6); color: #fff; padding: 6px 14px;
+    border-radius: 20px; font-size: 14px; display: none; z-index: 5;
+    pointer-events: none;
+  }
+  .presets-scroll { display: flex; gap: 8px; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 2px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="speed-hint"></div>
+<div id="controls">
+  <div class="row" id="mode-row"></div>
+  <div class="row"><div class="presets-scroll" id="preset-row"></div></div>
+  <div class="row" id="option-row"></div>
+</div>
+
+<script>
+// ========== CONFIG ==========
+const CELL_SIZE = 20, PIXEL_SIZE = 18;
+const HEX_SIZE = 12;
+const HEX_W = HEX_SIZE * 2, HEX_H = HEX_SIZE * Math.sqrt(3);
+const HEX_COL_SPACING = HEX_W * 0.75, HEX_ROW_SPACING = HEX_H;
+
+const PRESETS = [
+  { bg:'#000000', a:'#ffffff', b:'#000000' },
+  { bg:'#0d0d1a', a:'#33ccff', b:'#0d1a33' },
+  { bg:'#0d000d', a:'#ff1493', b:'#1a0014' },
+  { bg:'#000f00', a:'#38ff14', b:'#051a05' },
+  { bg:'#140a00', a:'#ff9900', b:'#261400' },
+  { bg:'#0a0014', a:'#b34dff', b:'#140026' },
+  { bg:'#1a0000', a:'#ff3333', b:'#260505' },
+  { bg:'#000014', a:'#4d80ff', b:'#05051f' },
+  { bg:'#0f0f0a', a:'#ffd966', b:'#1a140a' },
+  { bg:'#0a0f0a', a:'#66ffb3', b:'#0a1a0f' },
+];
+
+// ========== STATE ==========
+let canvas, ctx;
+let cols, rows, grid, balls;
+let useHex = false, splitMode = 'twoWay', horizontal = false, crt = false;
+let paused = false, speed = 40, lastTick = 0;
+let colorBg = '#000', colorA = '#fff', colorB = '#000';
+let activePreset = 0;
+let dragStartY = null, dragStartSpeed = 40;
+
+// ========== ENGINE ==========
+function setupGrid() {
+  grid = new Int8Array(cols * rows);
+  if (splitMode === 'twoWay') {
+    for (let y = 0; y < rows; y++)
+      for (let x = 0; x < cols; x++)
+        grid[y * cols + x] = horizontal ? (y < rows / 2 ? 0 : 1) : (x < cols / 2 ? 0 : 1);
+  } else {
+    for (let y = 0; y < rows; y++)
+      for (let x = 0; x < cols; x++) {
+        const left = x < cols / 2, top = y < rows / 2;
+        grid[y * cols + x] = ((left && top) || (!left && !top)) ? 0 : 1;
+      }
+  }
+}
+
+function setupBalls() {
+  if (splitMode === 'twoWay') {
+    if (horizontal) {
+      balls = [
+        { cx: cols>>1, cy: rows>>2, dx:1, dy:1, hd:1, rc:0 },
+        { cx: cols>>1, cy:(rows*3)>>2, dx:-1, dy:-1, hd:4, rc:1 },
+      ];
+    } else {
+      balls = [
+        { cx: cols>>2, cy: rows>>1, dx:1, dy:1, hd:1, rc:0 },
+        { cx:(cols*3)>>2, cy: rows>>1, dx:-1, dy:-1, hd:4, rc:1 },
+      ];
+    }
+  } else if (splitMode === 'fourQuad2Ball') {
+    balls = [
+      { cx: cols>>2, cy: rows>>2, dx:1, dy:1, hd:1, rc:0 },
+      { cx:(cols*3)>>2, cy: rows>>2, dx:-1, dy:1, hd:3, rc:1 },
+    ];
+  } else {
+    balls = [
+      { cx: cols>>2, cy: rows>>2, dx:1, dy:1, hd:1, rc:0 },
+      { cx:(cols*3)>>2, cy: rows>>2, dx:-1, dy:1, hd:3, rc:1 },
+      { cx: cols>>2, cy:(rows*3)>>2, dx:1, dy:-1, hd:0, rc:1 },
+      { cx:(cols*3)>>2, cy:(rows*3)>>2, dx:-1, dy:-1, hd:4, rc:0 },
+    ];
+  }
+}
+
+function cell(x, y) { return grid[y * cols + x]; }
+function setCell(x, y, v) { grid[y * cols + x] = v; }
+
+// ---- Square movement ----
+function updateBallSquare(b) {
+  const nx = b.cx + b.dx, ny = b.cy + b.dy;
+  let bx = false, by = false, hx = false, hy = false;
+
+  if (nx < 0 || nx >= cols) bx = true;
+  if (ny < 0 || ny >= rows) by = true;
+
+  if (!bx && cell(nx, b.cy) !== b.rc) { setCell(nx, b.cy, b.rc); bx = true; hx = true; }
+  if (!by && cell(b.cx, ny) !== b.rc) { setCell(b.cx, ny, b.rc); by = true; hy = true; }
+  if (!bx && !by && !hx && !hy) {
+    if (cell(nx, ny) !== b.rc) { setCell(nx, ny, b.rc); bx = true; by = true; }
+  }
+
+  if (bx) b.dx *= -1;
+  if (by) b.dy *= -1;
+
+  // Drift
+  if ((bx || by) && Math.random() < 0.1) {
+    if (bx && !by) { const n = b.cy + (Math.random() < 0.5 ? 1 : -1); if (n >= 0 && n < rows) b.cy = n; }
+    else if (by && !bx) { const n = b.cx + (Math.random() < 0.5 ? 1 : -1); if (n >= 0 && n < cols) b.cx = n; }
+  }
+  // Splash
+  if (hx || hy) {
+    if (Math.random() < 0.2) {
+      const off = [[-1,0],[1,0],[0,-1],[0,1]];
+      const [ox,oy] = off[(Math.random()*4)|0];
+      const sx = b.cx+ox, sy = b.cy+oy;
+      if (sx>=0 && sx<cols && sy>=0 && sy<rows && cell(sx,sy)!==b.rc) setCell(sx,sy,b.rc);
+    }
+  }
+  b.cx += b.dx; b.cy += b.dy;
+  b.cx = Math.max(0, Math.min(cols-1, b.cx));
+  b.cy = Math.max(0, Math.min(rows-1, b.cy));
+}
+
+// ---- Hex helpers ----
+const EVEN_OFF = [[1,-1],[1,0],[0,1],[-1,0],[-1,-1],[0,-1]];
+const ODD_OFF  = [[1,0],[1,1],[0,1],[-1,1],[-1,0],[0,-1]];
+
+function hexNeighbor(col, row, dir) {
+  const off = (col % 2 === 0) ? EVEN_OFF : ODD_OFF;
+  return [col + off[dir][0], row + off[dir][1]];
+}
+
+function hexComponentDirs(dir) {
+  switch(dir) {
+    case 0: return [1, 5]; // NE -> H=SE, V=N
+    case 1: return [0, 2]; // SE -> H=NE, V=S
+    case 3: return [4, 2]; // SW -> H=NW, V=S
+    case 4: return [3, 5]; // NW -> H=SW, V=N
+    default: return [1, 5];
+  }
+}
+function hexFlipH(d) { return [4,3,2,1,0,5][d]; } // NE↔NW, SE↔SW
+function hexFlipV(d) { return [1,0,2,4,3,5][d]; } // NE↔SE, NW↔SW
+
+function updateBallHex(b) {
+  const dir = b.hd;
+  const [hDir, vDir] = hexComponentDirs(dir);
+  const [diagX, diagY] = hexNeighbor(b.cx, b.cy, dir);
+  const [hX, hY] = hexNeighbor(b.cx, b.cy, hDir);
+  const [vX, vY] = hexNeighbor(b.cx, b.cy, vDir);
+
+  let bH = false, bV = false, hitH = false, hitV = false;
+
+  if (hX<0||hX>=cols||hY<0||hY>=rows) bH = true;
+  if (vX<0||vX>=cols||vY<0||vY>=rows) bV = true;
+
+  if (!bH && cell(hX,hY) !== b.rc) { setCell(hX,hY,b.rc); bH=true; hitH=true; }
+  if (!bV && cell(vX,vY) !== b.rc) { setCell(vX,vY,b.rc); bV=true; hitV=true; }
+
+  if (!bH && !bV && !hitH && !hitV) {
+    if (diagX<0||diagX>=cols||diagY<0||diagY>=rows) { bH=true; bV=true; }
+    else if (cell(diagX,diagY) !== b.rc) { setCell(diagX,diagY,b.rc); bH=true; bV=true; }
+  }
+
+  if (bH) b.hd = hexFlipH(b.hd);
+  if (bV) b.hd = hexFlipV(b.hd);
+
+  // Drift
+  if ((bH||bV) && Math.random()<0.1) {
+    let nudge = -1;
+    if (bH && !bV) nudge = vDir;
+    else if (bV && !bH) nudge = hDir;
+    if (nudge >= 0) {
+      const [nx,ny] = hexNeighbor(b.cx, b.cy, nudge);
+      if (nx>=0&&nx<cols&&ny>=0&&ny<rows) { b.cx=nx; b.cy=ny; }
+    }
+  }
+  // Splash
+  if (hitH||hitV) {
+    if (Math.random()<0.2) {
+      const sd = (Math.random()*6)|0;
+      const [sx,sy] = hexNeighbor(b.cx, b.cy, sd);
+      if (sx>=0&&sx<cols&&sy>=0&&sy<rows&&cell(sx,sy)!==b.rc) setCell(sx,sy,b.rc);
+    }
+  }
+  // Move
+  const [mx,my] = hexNeighbor(b.cx, b.cy, b.hd);
+  if (mx>=0&&mx<cols&&my>=0&&my<rows) { b.cx=mx; b.cy=my; }
+}
+
+// ========== RENDERING ==========
+function hexCenter(col, row) {
+  const x = col * HEX_COL_SPACING + HEX_SIZE;
+  const yOff = (col % 2 === 0) ? 0 : HEX_ROW_SPACING * 0.5;
+  const y = row * HEX_ROW_SPACING + yOff + HEX_H / 2;
+  return [x, y];
+}
+
+function drawHex(cx, cy, size) {
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const a = Math.PI / 3 * i;
+    const px = cx + size * Math.cos(a), py = cy + size * Math.sin(a);
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+}
+
+function render(time) {
+  requestAnimationFrame(render);
+  if (!grid) return;
+
+  // Tick engine
+  if (!paused) {
+    if (lastTick === 0) lastTick = time;
+    if (time - lastTick >= speed) {
+      lastTick = time;
+      for (const b of balls) {
+        if (useHex) updateBallHex(b); else updateBallSquare(b);
+      }
+    }
+  } else {
+    lastTick = 0;
+  }
+
+  const W = canvas.width, H = canvas.height;
+  ctx.fillStyle = colorBg;
+  ctx.fillRect(0, 0, W, H);
+
+  if (useHex) {
+    const inner = HEX_SIZE * 0.88;
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const v = grid[y * cols + x];
+        const [cx, cy] = hexCenter(x, y);
+        // Gap
+        ctx.globalAlpha = 0.15;
+        ctx.fillStyle = v === 0 ? colorA : colorB;
+        drawHex(cx, cy, HEX_SIZE); ctx.fill();
+        // Inner
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = v === 0 ? colorB : colorA;
+        drawHex(cx, cy, inner); ctx.fill();
+      }
+    }
+    // Balls
+    for (const b of balls) {
+      const [cx, cy] = hexCenter(b.cx, b.cy);
+      const v = grid[b.cy * cols + b.cx];
+      const bc = v === 0 ? colorA : colorB;
+      const glows = [[8,0.05],[5,0.12],[2,0.25]];
+      for (const [ex, op] of glows) {
+        ctx.globalAlpha = op; ctx.fillStyle = bc;
+        drawHex(cx, cy, inner+ex); ctx.fill();
+      }
+      ctx.globalAlpha = 1; ctx.fillStyle = bc;
+      drawHex(cx, cy, inner); ctx.fill();
+    }
+  } else {
+    const inset = (CELL_SIZE - PIXEL_SIZE) / 2;
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const v = grid[y * cols + x];
+        const px = x * CELL_SIZE, py = y * CELL_SIZE;
+        // Gap
+        ctx.globalAlpha = 0.15;
+        ctx.fillStyle = v === 0 ? colorA : colorB;
+        ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
+        // Pixel
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = v === 0 ? colorB : colorA;
+        ctx.fillRect(px+inset, py+inset, PIXEL_SIZE, PIXEL_SIZE);
+      }
+    }
+    // Balls
+    const bi = (CELL_SIZE - PIXEL_SIZE) / 2;
+    for (const b of balls) {
+      const bx = b.cx*CELL_SIZE+bi, by = b.cy*CELL_SIZE+bi;
+      const v = grid[b.cy*cols+b.cx];
+      const bc = v===0 ? colorA : colorB;
+      const glows = [[12,0.05],[8,0.1],[4,0.2]];
+      for (const [ex,op] of glows) {
+        ctx.globalAlpha = op; ctx.fillStyle = bc;
+        ctx.fillRect(bx-ex/2, by-ex/2, PIXEL_SIZE+ex, PIXEL_SIZE+ex);
+      }
+      ctx.globalAlpha = 1; ctx.fillStyle = bc;
+      ctx.fillRect(bx, by, PIXEL_SIZE, PIXEL_SIZE);
+    }
+  }
+
+  // CRT
+  if (crt) {
+    ctx.globalAlpha = 0.3; ctx.fillStyle = '#000';
+    for (let y = 0; y < H; y += 3) ctx.fillRect(0, y, W, 1);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ========== INIT ==========
+function reset() {
+  const W = window.innerWidth, H = window.innerHeight;
+  canvas.width = W * devicePixelRatio;
+  canvas.height = H * devicePixelRatio;
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+
+  if (useHex) {
+    cols = Math.max(1, Math.floor(W / HEX_COL_SPACING));
+    rows = Math.max(1, Math.floor(H / HEX_ROW_SPACING));
+  } else {
+    cols = Math.max(1, Math.floor(W / CELL_SIZE));
+    rows = Math.max(1, Math.floor(H / CELL_SIZE));
+  }
+  setupGrid(); setupBalls(); lastTick = 0;
+}
+
+function applyPreset(i) {
+  activePreset = i;
+  colorBg = PRESETS[i].bg; colorA = PRESETS[i].a; colorB = PRESETS[i].b;
+  buildPresetRow();
+}
+
+// ========== UI ==========
+function buildUI() {
+  buildModeRow(); buildPresetRow(); buildOptionRow();
+}
+
+function buildModeRow() {
+  const row = document.getElementById('mode-row');
+  row.innerHTML = '';
+  const modes = [
+    ['2-Split','twoWay'],['4x2','fourQuad2Ball'],['4x4','fourQuad4Ball']
+  ];
+  for (const [label, mode] of modes) {
+    const btn = document.createElement('button');
+    btn.className = 'btn' + (splitMode===mode?' active':'');
+    btn.textContent = label;
+    btn.onclick = () => { splitMode = mode; reset(); buildModeRow(); buildOptionRow(); };
+    row.appendChild(btn);
+  }
+}
+
+function buildPresetRow() {
+  const row = document.getElementById('preset-row');
+  row.innerHTML = '';
+  for (let i = 0; i < PRESETS.length; i++) {
+    const p = PRESETS[i];
+    const btn = document.createElement('button');
+    btn.className = 'preset' + (i===activePreset?' active':'');
+    btn.innerHTML = `<div class="preset-half" style="background:${p.b}"></div><div class="preset-half" style="background:${p.a}"></div>`;
+    btn.onclick = () => applyPreset(i);
+    row.appendChild(btn);
+  }
+}
+
+function buildOptionRow() {
+  const row = document.getElementById('option-row');
+  row.innerHTML = '';
+
+  // Hex toggle
+  const hexBtn = document.createElement('button');
+  hexBtn.className = 'btn icon-btn' + (useHex?' active':'');
+  hexBtn.innerHTML = '&#x2B21;';
+  hexBtn.title = 'Hex Grid';
+  hexBtn.onclick = () => { useHex = !useHex; reset(); buildOptionRow(); };
+  row.appendChild(hexBtn);
+
+  // Horizontal toggle (only for 2-split)
+  if (splitMode === 'twoWay') {
+    const hBtn = document.createElement('button');
+    hBtn.className = 'btn icon-btn' + (horizontal?' active':'');
+    hBtn.innerHTML = horizontal ? '&#x2503;' : '&#x2501;';
+    hBtn.title = 'Split Direction';
+    hBtn.onclick = () => { horizontal = !horizontal; reset(); buildOptionRow(); };
+    row.appendChild(hBtn);
+  }
+
+  // CRT toggle
+  const crtBtn = document.createElement('button');
+  crtBtn.className = 'btn icon-btn' + (crt?' active':'');
+  crtBtn.innerHTML = '&#x25A8;';
+  crtBtn.title = 'CRT';
+  crtBtn.onclick = () => { crt = !crt; buildOptionRow(); };
+  row.appendChild(crtBtn);
+
+  // Spacer
+  const sp = document.createElement('div');
+  sp.className = 'spacer';
+  row.appendChild(sp);
+
+  // Play button
+  const playBtn = document.createElement('button');
+  playBtn.className = 'btn icon-btn active';
+  playBtn.innerHTML = '&#x25B6;';
+  playBtn.onclick = () => { paused = false; document.getElementById('controls').classList.remove('visible'); };
+  row.appendChild(playBtn);
+}
+
+// ========== INPUT ==========
+let lastTapTime = 0;
+canvas = document.getElementById('c');
+ctx = canvas.getContext('2d');
+
+// Double-tap to reset
+canvas.addEventListener('dblclick', (e) => { e.preventDefault(); reset(); });
+
+// Two-finger tap to pause
+let touchCount = 0;
+canvas.addEventListener('touchstart', (e) => {
+  touchCount = e.touches.length;
+  if (touchCount === 2) {
+    e.preventDefault();
+    paused = !paused;
+    document.getElementById('controls').classList.toggle('visible', paused);
+    if (paused) buildUI();
+  }
+  if (touchCount === 1) {
+    dragStartY = e.touches[0].clientY;
+    dragStartSpeed = speed;
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+  if (touchCount === 1 && dragStartY !== null && !paused) {
+    e.preventDefault();
+    const dy = -(e.touches[0].clientY - dragStartY);
+    const change = -(dy / 20) * 5;
+    speed = Math.max(10, Math.min(120, dragStartSpeed + change));
+    showSpeedHint();
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', (e) => {
+  if (e.touches.length === 0) { dragStartY = null; dragStartSpeed = speed; touchCount = 0; }
+});
+
+// Keyboard controls
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Space') {
+    e.preventDefault();
+    paused = !paused;
+    document.getElementById('controls').classList.toggle('visible', paused);
+    if (paused) buildUI();
+  }
+  if (e.code === 'KeyR') reset();
+  if (e.code === 'KeyH') { useHex = !useHex; reset(); if (paused) buildOptionRow(); }
+  if (e.code === 'ArrowUp') { speed = Math.max(10, speed - 5); showSpeedHint(); }
+  if (e.code === 'ArrowDown') { speed = Math.min(120, speed + 5); showSpeedHint(); }
+});
+
+// Mouse drag for speed on desktop
+let mouseDown = false, mouseStartY = 0;
+canvas.addEventListener('mousedown', (e) => { mouseDown = true; mouseStartY = e.clientY; dragStartSpeed = speed; });
+canvas.addEventListener('mousemove', (e) => {
+  if (mouseDown && !paused) {
+    const dy = -(e.clientY - mouseStartY);
+    const change = -(dy / 20) * 5;
+    speed = Math.max(10, Math.min(120, dragStartSpeed + change));
+    showSpeedHint();
+  }
+});
+canvas.addEventListener('mouseup', () => { mouseDown = false; dragStartSpeed = speed; });
+
+let speedHintTimer;
+function showSpeedHint() {
+  const el = document.getElementById('speed-hint');
+  el.textContent = `Speed ${(1000/speed).toFixed(0)} tps`;
+  el.style.display = 'block';
+  clearTimeout(speedHintTimer);
+  speedHintTimer = setTimeout(() => el.style.display = 'none', 1500);
+}
+
+// Resize
+window.addEventListener('resize', () => reset());
+
+// Boot
+applyPreset(0);
+reset();
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
